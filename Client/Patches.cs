@@ -5,12 +5,10 @@
 // LICENSE file in the root directory of this source tree.
 //
 
-using Diz.Skinning;
 using EFT;
 using EFT.Animations;
 using EFT.AssetsManager;
 using EFT.InventoryLogic;
-using EFT.Visual;
 using EFT.UI;
 using EFT.UI.WeaponModding;
 using EFT.Utilities;
@@ -37,15 +35,6 @@ namespace SevenBoldPencil.TransparentSights
         public FirearmController _firearmController { get { return __firearmController.Get(__instance); } set { __firearmController.Set(__instance, value); } }
         public bool _isAiming { get { return __isAiming.Get(__instance); } set { __isAiming.Set(__instance, value); } }
     }
-
-	public struct MagazineInHandsVisualController_Proxy(MagazineInHandsVisualController instance)
-	{
-        private readonly MagazineInHandsVisualController __instance = instance;
-
-		private static TypedFieldInfo<MagazineInHandsVisualController, MagazineInHandsVisual> __magazineInHandsVisual = new("_magazineInHandsVisual");
-
-		public MagazineInHandsVisual _magazineInHandsVisual { get { return __magazineInHandsVisual.Get(__instance); } set { __magazineInHandsVisual.Set(__instance, value); } }
-	}
 
 	public struct ItemSpecificationPanel_Proxy(ItemSpecificationPanel instance)
 	{
@@ -115,21 +104,6 @@ namespace SevenBoldPencil.TransparentSights
 		}
 	}
 
-	// this is used right before lodded skin is destroyed
-	public class Patch_LoddedSkin_Unskin : ModulePatch
-	{
-        protected override MethodBase GetTargetMethod()
-        {
-            return AccessTools.Method(typeof(LoddedSkin), nameof(LoddedSkin.Unskin));
-        }
-
-        [PatchPrefix]
-        public static void Prefix(LoddedSkin __instance)
-		{
-			Plugin.Instance.OnSkinDestroyed(__instance);
-		}
-	}
-
 	public class Patch_ItemSpecificationPanel_Show : ModulePatch
     {
         protected override MethodBase GetTargetMethod()
@@ -195,48 +169,6 @@ namespace SevenBoldPencil.TransparentSights
 			Plugin.Instance.RemovePanel(templateId, __instance);
         }
     }
-
-	public class Patch_Firearms_SetupMod : ModulePatch
-	{
-        protected override MethodBase GetTargetMethod()
-        {
-            return AccessTools.Method(typeof(Firearms), nameof(Firearms.SetupMod));
-        }
-
-        [PatchPostfix]
-        private static void Postfix(Firearms __instance, Slot slot, GameObject modObject)
-		{
-			Plugin.Instance.OnSetupMod(__instance, modObject);
-		}
-	}
-
-	public class Patch_Firearms_RemoveMod : ModulePatch
-	{
-        protected override MethodBase GetTargetMethod()
-        {
-            return AccessTools.Method(typeof(Firearms), nameof(Firearms.RemoveMod));
-        }
-
-        [PatchPrefix]
-        private static void Prefix(Firearms __instance, Slot slot)
-		{
-			Plugin.Instance.OnRemoveMod(__instance, slot);
-		}
-	}
-
-	public class Patch_Firearms_SetRoundIntoWeapon : ModulePatch
-	{
-        protected override MethodBase GetTargetMethod()
-        {
-            return AccessTools.Method(typeof(Firearms), nameof(Firearms.SetRoundIntoWeapon));
-        }
-
-        [PatchPostfix]
-		private static void Postfix(Firearms __instance, Ammo ammo, int chamberNumber = 0)
-		{
-			Plugin.Instance.SetRoundIntoWeapon(__instance, chamberNumber);
-		}
-	}
 
     // if player keeps ADS on raid end, game will try to unADS
     // on start of the next raid and hit nullref exception because cached

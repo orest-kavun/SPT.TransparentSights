@@ -12,7 +12,6 @@ using EFT;
 using EFT.AssetsManager;
 using EFT.CameraControl;
 using EFT.InventoryLogic;
-using EFT.Visual;
 using EFT.UI;
 using EFT.UI.WeaponModding;
 using Newtonsoft.Json;
@@ -20,14 +19,11 @@ using SevenBoldPencil.Common;
 using System;
 using System.IO;
 using System.Reflection;
-using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.Networking;
-using UnityEngine.SceneManagement;
 using UnityStandardAssets.ImageEffects;
-using UnityEngine.Video;
 using BlurSampleCount = UnityStandardAssets.ImageEffects.DepthOfField.BlurSampleCount;
+using BlurType = UnityStandardAssets.ImageEffects.DepthOfField.BlurType;
 
 namespace SevenBoldPencil.TransparentSights
 {
@@ -58,7 +54,9 @@ namespace SevenBoldPencil.TransparentSights
         float focalLength,
         float focalSize,
         float foregroundOverlap,
-        float maxBlurSize
+        float maxBlurSize,
+        BlurType blurType,
+        bool highResolution
     );
 
     public readonly record struct PatchedItem
@@ -80,25 +78,23 @@ namespace SevenBoldPencil.TransparentSights
 		EnabledWithMount,
 	}
 
-    [BepInPlugin("7Bpencil.TransparentSights", "7Bpencil.TransparentSights", "0.2.3")]
+    [BepInPlugin("7Bpencil.TransparentSights", "7Bpencil.TransparentSights", "0.2.27")]
     public class Plugin : BaseUnityPlugin
     {
         public static readonly int _Cull = Shader.PropertyToID("_Cull");
-
         private const double SaveLagTime = 10;
 
         public static Plugin Instance;
 
-        public static ConfigEntry<bool> MakeEntireWeaponTransparent;
-        public static ConfigEntry<bool> MakeOpticHousingTransparent;
-        public static ConfigEntry<bool> DOF_enabled;
-        public static ConfigEntry<BlurSampleCount> DOF_blurSampleCount;
-        public static ConfigEntry<float> DOF_aperture;
-        public static ConfigEntry<float> DOF_focalLength;
-        public static ConfigEntry<float> DOF_focalSize;
-        public static ConfigEntry<float> DOF_foregroundOverlap;
-        public static ConfigEntry<float> DOF_maxBlurSize;
-        public static ConfigEntry<float> DOF_maxBlurSize_optic;
+        private ConfigEntry<bool> MakeOpticHousingTransparent;
+        private ConfigEntry<bool> WeaponBlur;
+        private ConfigEntry<float> WeaponBlurSize;
+        private ConfigEntry<float> OpticBlurSize;
+        private ConfigEntry<float> ForegroundSpreadLimit;
+        private ConfigEntry<bool> UseHousingLayer;
+        private ConfigEntry<float> LayerOpacity;
+        private ConfigEntry<float> LayerBlurRadius;
+        private HousingLayer SeparateHousing;
 
 		public ManualLogSource LoggerInstance;
 
@@ -117,35 +113,39 @@ namespace SevenBoldPencil.TransparentSights
             Instance = this;
 			LoggerInstance = Logger;
 
-            var generalGroup = "General";
-            MakeEntireWeaponTransparent = Config.Bind<bool>(generalGroup, "Make entire weapon transparent", false);
-            MakeOpticHousingTransparent = Config.Bind<bool>(generalGroup, "Make optic housing transparent", false);
-            DOF_enabled = Config.Bind<bool>(generalGroup, "Blur transparent sights", true);
+            MakeOpticHousingTransparent = Config.Bind("General", "Make optic housing transparent", false);
 
-            var dofGroup = "Depth of Field";
-            DOF_maxBlurSize = Config.Bind<float>(dofGroup, "Blur Size", 0.94f, new ConfigDescription("", new AcceptableValueRange<float>(0, 10)));
-            DOF_maxBlurSize_optic = Config.Bind<float>(dofGroup, "Blur Size in Optic", 7.418873f, new ConfigDescription("", new AcceptableValueRange<float>(0, 10)));
+            const string layerGroup = "Housing Layer";
+            UseHousingLayer = Config.Bind(layerGroup, "Separate housing blur", false,
+                "Blur the housing independently of the weapon while aiming with a compatible sight.");
+            LayerOpacity = Config.Bind(layerGroup, "Housing opacity", 0.45f,
+                new ConfigDescription("Opacity of the blurred housing.", new AcceptableValueRange<float>(0f, 1f)));
+            LayerBlurRadius = Config.Bind(layerGroup, "Housing blur radius", 18f,
+                new ConfigDescription("Housing blur radius in screen pixels.", new AcceptableValueRange<float>(0f, 48f)));
 
-            var dofAdvancedGroup = "Depth of Field Advanced";
-            DOF_blurSampleCount = Config.Bind<BlurSampleCount>(dofAdvancedGroup, "Blur Quality", BlurSampleCount.High);
-            DOF_aperture = Config.Bind<float>(dofAdvancedGroup, "Aperture", 4, new ConfigDescription("", new AcceptableValueRange<float>(0, 50)));
-            DOF_focalLength = Config.Bind<float>(dofAdvancedGroup, "Focal Length", 1.53f, new ConfigDescription("", new AcceptableValueRange<float>(0, 100)));
-            DOF_focalSize = Config.Bind<float>(dofAdvancedGroup, "Focal Size", 0.61f, new ConfigDescription("", new AcceptableValueRange<float>(0, 10)));
-            DOF_foregroundOverlap = Config.Bind<float>(dofAdvancedGroup, "Foreground Overlap", 2.63f, new ConfigDescription("", new AcceptableValueRange<float>(0, 10)));
+            WeaponBlur = Config.Bind("General", "Blur transparent sights", true,
+                "Enable camera depth of field while aiming. With separate housing blur, this controls weapon blur.");
+            const string dofGroup = "Depth of Field";
+            WeaponBlurSize = Config.Bind(dofGroup, "Blur Size", 0.94f,
+                new ConfigDescription("Camera blur strength for non-magnified views.", new AcceptableValueRange<float>(0f, 10f)));
+            OpticBlurSize = Config.Bind(dofGroup, "Blur Size in Optic", 7.418873f,
+                new ConfigDescription("Camera blur strength for magnified views.", new AcceptableValueRange<float>(0f, 10f)));
+            ForegroundSpreadLimit = Config.Bind("Depth of Field Advanced", "Foreground spread limit", 4f,
+                new ConfigDescription("Maximum spread past foreground edges. Zero confines blur to the foreground mask.",
+                    new AcceptableValueRange<float>(0f, 20f)));
 
-            MakeEntireWeaponTransparent.SettingChanged += (_, _) => Change_TransparencySettings();
             MakeOpticHousingTransparent.SettingChanged += (_, _) => Change_TransparencySettings();
-            DOF_enabled.SettingChanged += (_, _) => Change_DOF_Enabled();
-            DOF_blurSampleCount.SettingChanged += (_, _) => Change_DOF_Settings();
-            DOF_aperture.SettingChanged += (_, _) => Change_DOF_Settings();
-            DOF_focalLength.SettingChanged += (_, _) => Change_DOF_Settings();
-            DOF_focalSize.SettingChanged += (_, _) => Change_DOF_Settings();
-            DOF_foregroundOverlap.SettingChanged += (_, _) => Change_DOF_Settings();
-            DOF_maxBlurSize.SettingChanged += (_, _) => Change_DOF_Settings();
-            DOF_maxBlurSize_optic.SettingChanged += (_, _) => Change_DOF_Settings();
+            UseHousingLayer.SettingChanged += (_, _) => Change_TransparencySettings();
+            LayerOpacity.SettingChanged += (_, _) => SeparateHousing.SetAppearance(LayerBlurRadius.Value, LayerOpacity.Value);
+            LayerBlurRadius.SettingChanged += (_, _) => SeparateHousing.SetAppearance(LayerBlurRadius.Value, LayerOpacity.Value);
+            WeaponBlur.SettingChanged += (_, _) => Change_DOF_Settings();
+            WeaponBlurSize.SettingChanged += (_, _) => Change_DOF_Settings();
+            OpticBlurSize.SettingChanged += (_, _) => Change_DOF_Settings();
+            ForegroundSpreadLimit.SettingChanged += (_, _) => Change_DOF_Settings();
 
             var assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             SightShader = Shader.Find("Transparent/DepthZwriteDithered");
+            SeparateHousing = new HousingLayer(Logger);
             ConfigPath = Path.Combine(assemblyDir, "config.json");
             TransparentScopes = LoadTransparentScopes(ConfigPath);
             ScopesItemPanels = new();
@@ -154,66 +154,86 @@ namespace SevenBoldPencil.TransparentSights
 
             new Patch_PWA_OnAimOrPoseChanged().Enable();
             new Patch_AssetPoolObject_OnDestroy().Enable();
-            new Patch_LoddedSkin_Unskin().Enable();
             new Patch_ItemSpecificationPanel_Show().Enable();
             new Patch_ItemSpecificationPanel_Close().Enable();
-            new Patch_Firearms_SetupMod().Enable();
-            new Patch_Firearms_RemoveMod().Enable();
-            new Patch_Firearms_SetRoundIntoWeapon().Enable();
             new Patch_BaseLocalGame_GameEnd().Enable();
+            new Patch_DepthOfField_ForegroundMask().Enable();
+            new Patch_HousingLayer_SsaaOutput().Enable();
 #if DEBUG
             new Patch_FirearmController_Idling_DisableAimingOnReload().Enable();
 #endif
         }
 
+        internal bool ShouldFilterForegroundMask(DepthOfField effect)
+        {
+            return WeaponBlur.Value && CurrentPatchedScope.Some(out var scope) &&
+                scope.DOFDataOption.Some(out var data) && data.DOF == effect;
+        }
+
         public void Change_DOF_Settings()
         {
-            if (CurrentPatchedScope.Some(out var currentPatchedScope) && currentPatchedScope.DOFDataOption.Some(out var DOFData))
+            if (!CurrentPatchedScope.Some(out var scope))
             {
-                var isOptic = IsOptic(currentPatchedScope.Firearms);
-                Set_DOF_Settings_Config(DOFData.DOF, Get_DOF_Config(isOptic));
+                return;
             }
+
+            if (!WeaponBlur.Value)
+            {
+                if (scope.DOFDataOption.Some(out var saved))
+                {
+                    Set_DOF_Settings_Config(saved.DOF, saved.OriginalSettings);
+                    CurrentPatchedScope = new(scope with { DOFDataOption = default });
+                }
+                return;
+            }
+
+            if (!scope.DOFDataOption.Some(out var data) || !data.DOF)
+            {
+                var snapshot = TryGetDOFData();
+                if (!snapshot.Some(out data))
+                {
+                    return;
+                }
+                CurrentPatchedScope = new(scope with { DOFDataOption = snapshot });
+            }
+
+            Set_DOF_Settings_Config(data.DOF, Get_DOF_Config(data, IsOptic(scope.Firearms)));
         }
 
-        public void Change_DOF_Enabled()
+        private SettingsDOF Get_DOF_Config(DOFData data, bool isOptic)
         {
-            if (CurrentPatchedScope.Some(out var currentPatchedScope) && currentPatchedScope.DOFDataOption.Some(out var DOFData))
+            var blurSize = isOptic ? OpticBlurSize.Value : WeaponBlurSize.Value;
+            // DiscBlur doubles the internal width in full resolution.
+            var overlap = Mathf.Min(2.63f, ForegroundSpreadLimit.Value / (2f * Mathf.Max(0.1f, blurSize)));
+            return data.OriginalSettings with
             {
-                var isOptic = IsOptic(currentPatchedScope.Firearms);
-                if (DOF_enabled.Value)
-                {
-                    Set_DOF_Settings_Config(DOFData.DOF, Get_DOF_Config(isOptic));
-                }
-                else
-                {
-                    Set_DOF_Settings_Config(DOFData.DOF, DOFData.OriginalSettings);
-                }
-            }
-        }
-
-        public SettingsDOF Get_DOF_Config(bool isOptic)
-        {
-            return new SettingsDOF
-            (
-                enabled: DOF_enabled.Value,
-                blurSampleCount: DOF_blurSampleCount.Value,
-                aperture: DOF_aperture.Value,
-                focalLength: DOF_focalLength.Value,
-                focalSize: DOF_focalSize.Value,
-                foregroundOverlap: DOF_foregroundOverlap.Value,
-                maxBlurSize: isOptic ? DOF_maxBlurSize_optic.Value : DOF_maxBlurSize.Value
-            );
+                enabled = true,
+                blurSampleCount = BlurSampleCount.High,
+                aperture = 4f,
+                focalLength = 1.53f,
+                focalSize = 0.61f,
+                foregroundOverlap = overlap,
+                maxBlurSize = blurSize,
+                blurType = BlurType.DiscBlur,
+                highResolution = true
+            };
         }
 
         public void Set_DOF_Settings_Config(DepthOfField DOF, SettingsDOF settings)
         {
-            DOF.enabled = settings.enabled;
+            if (!DOF)
+            {
+                return;
+            }
             DOF.blurSampleCount = settings.blurSampleCount;
             DOF.aperture = settings.aperture;
             DOF.focalLength = settings.focalLength;
             DOF.focalSize = settings.focalSize;
             DOF.foregroundOverlap = settings.foregroundOverlap;
             DOF.maxBlurSize = settings.maxBlurSize;
+            DOF.blurType = settings.blurType;
+            DOF.highResolution = settings.highResolution;
+            DOF.enabled = settings.enabled;
         }
 
         public Dictionary<string, ScopeTransparencyMode> LoadTransparentScopes(string filePath)
@@ -372,21 +392,16 @@ namespace SevenBoldPencil.TransparentSights
             }
 
             var isOptic = IsOptic(firearms);
-            RebuildCurrentTransparentItems(player, firearms, isOptic);
+            RebuildCurrentTransparentItems(firearms, isOptic);
 
             if (CurrentTransparentItems.Count != 0)
             {
-                var DOFDataOption = TryGetDOFData();
                 CurrentPatchedScope = new(new CurrentPatchedScope
                 (
                     Player: player,
                     Firearms: firearms,
-                    DOFDataOption: DOFDataOption
+                    DOFDataOption: default
                 ));
-                if (DOF_enabled.Value && DOFDataOption.Some(out var DOFData))
-                {
-                    Set_DOF_Settings_Config(DOFData.DOF, Get_DOF_Config(isOptic));
-                }
             }
 
             CurrentAiming = new(new CurrentAiming
@@ -394,11 +409,32 @@ namespace SevenBoldPencil.TransparentSights
                 Player: player,
                 Firearms: firearms
             ));
+            RefreshSeparateHousing(firearms);
+            Change_DOF_Settings();
+        }
+
+        private void RefreshSeparateHousing(Firearms firearms)
+        {
+            var aimingMod = firearms.ProceduralWeaponAnimation.CurrentAimingMod;
+            if (!UseHousingLayer.Value || aimingMod == null ||
+                !TryGetScope(aimingMod.Item, firearms.WeaponPrefab).Some(out var sight) ||
+                !CurrentTransparentItems.Contains(sight.gameObject.GetInstanceID()) ||
+                !PatchedItems.TryGetValue(sight.gameObject.GetInstanceID(), out var item))
+            {
+                return;
+            }
+            SeparateHousing.Attach(CameraManager.Instance?._camera, sight.name, item.PatchedRenderers,
+                LayerBlurRadius.Value, LayerOpacity.Value);
+        }
+
+        internal void CompositeUpscaledHousing(SSAAImpl instance, RenderTexture source, SSAAPropagator propagator)
+        {
+            SeparateHousing?.CompositeUpscaled(instance, source, propagator);
         }
 
         public Option<DOFData> TryGetDOFData()
         {
-            var DOF = CameraManager.Instance._depthOfField;
+            var DOF = CameraManager.Instance?._depthOfField;
 
             // for some reason DOF is sometimes null...
             if (DOF)
@@ -411,7 +447,9 @@ namespace SevenBoldPencil.TransparentSights
                     focalLength: DOF.focalLength,
                     focalSize: DOF.focalSize,
                     foregroundOverlap: DOF.foregroundOverlap,
-                    maxBlurSize: DOF.maxBlurSize
+                    maxBlurSize: DOF.maxBlurSize,
+                    blurType: DOF.blurType,
+                    highResolution: DOF.highResolution
                 );
                 return new(new(DOF, originalSettings));
             }
@@ -427,84 +465,33 @@ namespace SevenBoldPencil.TransparentSights
         // weapon can change between OnAimingDisabled and OnAimingEnabled,
         // so we have to update a list of items that get transparent,
         // hopefully its not that expensive
-        public void RebuildCurrentTransparentItems(Player player, Firearms firearms, bool isOptic)
+        public void RebuildCurrentTransparentItems(Firearms firearms, bool isOptic)
         {
-			if (isOptic && !MakeOpticHousingTransparent.Value)
-			{
-				return;
-			}
-
-            var weaponPrefab = firearms.WeaponPrefab;
-            if (MakeEntireWeaponTransparent.Value)
+            if (isOptic && !MakeOpticHousingTransparent.Value)
             {
-                var hands = player.PlayerBody.BodySkins[EBodyModelPart.Hands];
-                TryPatchItem(hands, PatchRenderers);
-                TryPatchItem(weaponPrefab, PatchRenderers);
-                if (weaponPrefab.ContainerCollectionView != null)
-                {
-                    foreach (var (container, containerData) in weaponPrefab.ContainerCollectionView.ContainerBones)
-                    {
-                        // empty slots or slots with invisible items have nulls (soft armor, helmet plates, etc)
-                        if (containerData.Item == null)
-                        {
-                            continue;
-                        }
-                        if (!containerData.ItemView)
-                        {
-                            continue;
-                        }
-                        if (containerData.ItemView.TryGetComponent<AssetPoolObject>(out var subItemAssetPoolObject))
-                        {
-                            TryPatchMod(subItemAssetPoolObject);
-                        }
-                    }
-                }
-                foreach (var bullet in firearms._ammoObjectInWeapon)
-                {
-                    TryPatchItem(bullet, PatchRenderers);
-                }
-                // this one is important for revolvers, test:
-                // ADS, shoot 2 times, un ADS, then ADS again, you will see
-                foreach (var bullet in firearms._shellsInShellPort)
-                {
-                    TryPatchItem(bullet, PatchRenderers);
-                }
+                return;
             }
-            else
+
+            var currentAimingMod = firearms.ProceduralWeaponAnimation.CurrentAimingMod;
+            if (currentAimingMod == null)
             {
-                var pwa = firearms.ProceduralWeaponAnimation;
-    			var currentAimingMod = pwa.CurrentAimingMod;
-    			if (currentAimingMod == null)
-    			{
-    				// happens with weapons that have scope "builtin" (PPSH and UZI for example)
-    				return;
-    			}
+                return;
+            }
 
-                var scopeItem = currentAimingMod.Item;
-    			var scopeTemplateId = scopeItem.StringTemplateId;
-                var scopeTransparencyMode = GetScopeTransparencyMode(scopeTemplateId);
-
-                LogInfo("Sight:", scopeTemplateId, scopeTransparencyMode);
-
-                if (scopeTransparencyMode == ScopeTransparencyMode.Enabled)
-                {
-                    if (TryGetScope(scopeItem, weaponPrefab).Some(out var scopeVisual))
-                    {
-                        TryPatchCompoundItem(scopeItem, scopeVisual, weaponPrefab);
-                    }
-                }
-                if (scopeTransparencyMode == ScopeTransparencyMode.EnabledWithMount)
-                {
-                    if (TryGetScopeMount(scopeItem, weaponPrefab).Some(out var mountData))
-                    {
-                        var (mountItem, mountVisual) = mountData;
-                        TryPatchCompoundItem(mountItem, mountVisual, weaponPrefab);
-                    }
-                    else if (TryGetScope(scopeItem, weaponPrefab).Some(out var scopeVisual))
-                    {
-                        TryPatchCompoundItem(scopeItem, scopeVisual, weaponPrefab);
-                    }
-                }
+            var scopeItem = currentAimingMod.Item;
+            var weaponPrefab = firearms.WeaponPrefab;
+            var mode = GetScopeTransparencyMode(scopeItem.StringTemplateId);
+            if (mode == ScopeTransparencyMode.Disabled)
+            {
+                return;
+            }
+            if (mode == ScopeTransparencyMode.EnabledWithMount && TryGetScopeMount(scopeItem, weaponPrefab).Some(out var mount))
+            {
+                TryPatchCompoundItem(mount.Item1, mount.Item2, weaponPrefab);
+            }
+            else if (TryGetScope(scopeItem, weaponPrefab).Some(out var scopeVisual))
+            {
+                TryPatchCompoundItem(scopeItem, scopeVisual, weaponPrefab);
             }
         }
 
@@ -604,7 +591,7 @@ namespace SevenBoldPencil.TransparentSights
         // - iron sight attachment on acog
         public void TryPatchCompoundItem(Item item, AssetPoolObject assetPoolObject, WeaponPrefab weaponPrefab)
         {
-            TryPatchItem(assetPoolObject, PatchRenderers);
+            TryPatchItem(assetPoolObject);
 
             if (item is not CompoundItem compoundItem)
             {
@@ -638,30 +625,6 @@ namespace SevenBoldPencil.TransparentSights
             }
         }
 
-        public void TryPatchMod(AssetPoolObject assetPoolObject)
-        {
-            TryPatchItem(assetPoolObject, PatchRenderers);
-
-            if (assetPoolObject is MagazineInHandsVisualController mag)
-            {
-                var magazineInHandsVisual = new MagazineInHandsVisualController_Proxy(mag)._magazineInHandsVisual;
-                if (magazineInHandsVisual is SpringMagazineVisual boxMagazine)
-                {
-                    foreach (var bullet in boxMagazine._ammoPoolObjects)
-                    {
-                        TryPatchItem(bullet, PatchRenderers);
-                    }
-                }
-                if (magazineInHandsVisual is BeltMagazineInHandsVisual beltBoxMagazine)
-                {
-                    foreach (var bullet in beltBoxMagazine._ammoPoolObjects)
-                    {
-                        TryPatchItem(bullet, PatchRenderers);
-                    }
-                }
-            }
-        }
-
         public void Change_TransparencySettings()
         {
             if (CurrentAiming.Some(out var currentAiming))
@@ -672,6 +635,7 @@ namespace SevenBoldPencil.TransparentSights
 
         public void OnAimingDisabled()
         {
+            SeparateHousing?.Detach();
             if (CurrentPatchedScope.Some(out var currentPatchedScope))
             {
                 LogInfo("OnAimingDisabled");
@@ -692,7 +656,7 @@ namespace SevenBoldPencil.TransparentSights
             CurrentAiming = default;
         }
 
-        public void TryPatchItem<T>(T item, Func<T, List<PatchedRenderer>> patcher) where T : MonoBehaviour
+        private void TryPatchItem(AssetPoolObject item)
         {
             if (!item)
             {
@@ -701,7 +665,7 @@ namespace SevenBoldPencil.TransparentSights
             var instanceID = item.gameObject.GetInstanceID();
             if (!PatchedItems.ContainsKey(instanceID))
             {
-                var patchedRenderers = patcher(item);
+                var patchedRenderers = PatchRenderers(item);
                 var patchedItem = new PatchedItem(patchedRenderers);
                 PatchedItems.Add(instanceID, patchedItem);
             }
@@ -709,28 +673,13 @@ namespace SevenBoldPencil.TransparentSights
             ForPatchedItem(instanceID, SetPatchedMaterials);
         }
 
-        public List<PatchedRenderer> PatchRenderers(AssetPoolObject assetPoolObject)
+        private List<PatchedRenderer> PatchRenderers(AssetPoolObject assetPoolObject)
         {
             var renderers = assetPoolObject.Renderers;
             var result = new List<PatchedRenderer>(renderers.Count);
             foreach (var renderer in renderers)
             {
                 if (PatchRenderer(renderer).Some(out var patchedRenderer))
-                {
-    				result.Add(patchedRenderer);
-                }
-            }
-
-            return result;
-        }
-
-        public List<PatchedRenderer> PatchRenderers(LoddedSkin skin)
-        {
-            var lods = skin._lods;
-            var result = new List<PatchedRenderer>();
-            foreach (var lod in lods)
-            {
-                if (PatchRenderer(lod.SkinnedMeshRenderer).Some(out var patchedRenderer))
                 {
     				result.Add(patchedRenderer);
                 }
@@ -798,111 +747,31 @@ namespace SevenBoldPencil.TransparentSights
             }
         }
 
-        public void SetPatchedMaterials(PatchedItem patchedItem)
+        public void SetPatchedMaterials(PatchedItem item)
         {
-            foreach (var patchedRenderer in patchedItem.PatchedRenderers)
+            foreach (var entry in item.PatchedRenderers)
             {
-                patchedRenderer.Renderer.materials = patchedRenderer.Patched;
+                if (entry.Renderer)
+                {
+                    entry.Renderer.sharedMaterials = entry.Patched;
+                }
             }
         }
 
-        public void SetOriginalMaterials(PatchedItem patchedItem)
+        public void SetOriginalMaterials(PatchedItem item)
         {
-            foreach (var patchedRenderer in patchedItem.PatchedRenderers)
+            foreach (var entry in item.PatchedRenderers)
             {
-                patchedRenderer.Renderer.materials = patchedRenderer.Original;
+                if (entry.Renderer)
+                {
+                    entry.Renderer.sharedMaterials = entry.Original;
+                }
             }
-        }
-
-        public void OnSetupMod(Firearms firearms, GameObject modObject)
-        {
-            if (!MakeEntireWeaponTransparent.Value)
-            {
-                return;
-            }
-            if (!CurrentPatchedScope.Some(out var currentPatchedScope))
-            {
-                return;
-            }
-            if (firearms != currentPatchedScope.Firearms)
-            {
-                return;
-            }
-
-			if (!modObject.TryGetComponent<AssetPoolObject>(out var assetPoolObject))
-            {
-                return;
-            }
-
-            TryPatchMod(assetPoolObject);
-
-			LogInfo("OnSetupMod:", assetPoolObject.name);
-        }
-
-        public void OnRemoveMod(Firearms firearms, Slot slot)
-        {
-            if (!MakeEntireWeaponTransparent.Value)
-            {
-                return;
-            }
-            if (!CurrentPatchedScope.Some(out var currentPatchedScope))
-            {
-                return;
-            }
-            if (firearms != currentPatchedScope.Firearms)
-            {
-                return;
-            }
-
-			var viewForSlot = firearms.ContainerCollectionView.GetViewForSlot(slot);
-			var index = viewForSlot.Bone.childCount - 1;
-			var child = viewForSlot.Bone.GetChild(index);
-
-			if (!child.TryGetComponent<AssetPoolObject>(out var assetPoolObject))
-			{
-                return;
-			}
-
-            var instanceID = assetPoolObject.gameObject.GetInstanceID();
-            if (CurrentTransparentItems.Remove(instanceID))
-            {
-                // TODO not sure about bullets in magazines
-                ForPatchedItem(instanceID, SetOriginalMaterials);
-            }
-
-			LogInfo("OnRemoveMod:", assetPoolObject.name);
-        }
-
-        public void SetRoundIntoWeapon(Firearms firearms, int chamberNumber)
-        {
-            if (!MakeEntireWeaponTransparent.Value)
-            {
-                return;
-            }
-            if (!CurrentPatchedScope.Some(out var currentPatchedScope))
-            {
-                return;
-            }
-            if (currentPatchedScope.Firearms != firearms)
-            {
-                return;
-            }
-
-            var bullet = firearms._ammoObjectInWeapon[chamberNumber];
-            TryPatchItem(bullet, PatchRenderers);
-
-			LogInfo("SetRoundIntoWeapon");
         }
 
         public void OnAssetPoolObjectDestroyed(AssetPoolObject assetPoolObject)
         {
             var instanceID = assetPoolObject.gameObject.GetInstanceID();
-            OnPatchedItemDestroyed(instanceID);
-        }
-
-        public void OnSkinDestroyed(LoddedSkin skin)
-        {
-            var instanceID = skin.gameObject.GetInstanceID();
             OnPatchedItemDestroyed(instanceID);
         }
 
@@ -919,13 +788,30 @@ namespace SevenBoldPencil.TransparentSights
         {
             foreach (var patchedRenderer in patchedRenderers)
             {
-                foreach (var patched in patchedRenderer.Patched)
+                for (var i = 0; i < patchedRenderer.Patched.Length; i++)
                 {
-                    Destroy(patched);
+                    var patched = patchedRenderer.Patched[i];
+                    if (patched && patched != patchedRenderer.Original[i])
+                    {
+                        Destroy(patched);
+                    }
                 }
             }
 
             patchedRenderers.Clear();
+        }
+
+        private void OnDestroy()
+        {
+            if (PatchedItems != null)
+            {
+                OnAimingDisabled();
+                foreach (var item in PatchedItems.Values)
+                {
+                    CleanPatchedRenderers(item.PatchedRenderers);
+                }
+            }
+            SeparateHousing?.Dispose();
         }
 
         public void LogInfo<A>(A a)

@@ -18,6 +18,8 @@
     <Reference Include="UnityEngine" />
     <Reference Include="UnityEngine.InputLegacyModule" />
     <Reference Include="UnityEngine.CoreModule" />
+    <Reference Include="Unity.Collections" />
+    <Reference Include="Unity.Postprocessing.Runtime" />
   </ItemGroup>
 
 </Project>
